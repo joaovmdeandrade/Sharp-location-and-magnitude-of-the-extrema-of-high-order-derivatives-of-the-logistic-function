@@ -1,0 +1,421 @@
+import argparse
+import sys
+
+import mpmath as mp
+
+# --------------------------------------------------------------------------
+# core objects
+# --------------------------------------------------------------------------
+
+
+def sigma_d(n, x):
+    """sigma^(n)(x) for x > 0, via  sigma^(n)(x) = (-1)^n Li_{-n}(-e^{-x}).
+
+    Only used as a numerical device; no proof in the paper depends on it.
+    """
+    return (-1) ** n * mp.polylog(-n, -mp.e ** (-x))
+
+
+def x0(n):
+    """Dominant-pole approximation  x_n^(0) = pi tan(pi/(2(n+2)))."""
+    return mp.pi * mp.tan(mp.pi / (2 * (n + 2)))
+
+
+def extremum(n, tol=None):
+    """The positive maximizer x_n of |sigma^(n)|, n even.
+
+    Extrema of sigma^(n) are zeros of sigma^(n+1); Newton is started at
+    x_n^(0), which by Theorem 6.1 is within 3^-(n+2) of the answer.
+    """
+    if n % 2:
+        raise ValueError("n must be even")
+    if tol is None:
+        tol = mp.mpf(10) ** (-(mp.mp.dps - 20))
+    return mp.findroot(lambda x: sigma_d(n + 1, x), x0(n), tol=tol, verify=False)
+
+
+def second_order_term(n):
+    """Predicted  x_n - x_n^(0)  of Theorem 6.1, eq. (19):
+
+        (sqrt(3) pi / 2) * 3^-(n+2) / (n+2).
+    """
+    return mp.sqrt(3) * mp.pi / 2 * mp.mpf(3) ** (-(n + 2)) / (n + 2)
+
+
+def normalized_norm(n, xn=None):
+    """A_n = ||sigma^(n)||_inf * pi^(n+1) / (2 n!), for n even."""
+    if xn is None:
+        xn = extremum(n)
+    return abs(sigma_d(n, xn)) * mp.pi ** (n + 1) / (2 * mp.factorial(n))
+
+
+def cos_term(n):
+    """cos^{n+2}(pi/(2(n+2))), the main term of Theorem 7.1."""
+    return mp.cos(mp.pi / (2 * (n + 2))) ** (n + 2)
+
+
+def odd_norm_closed_form(n):
+    """||sigma^(n)||_inf for odd n, Theorem 3.1:
+    (2 n!/pi^{n+1}) (1 - 2^{-(n+1)}) zeta(n+1)."""
+    return (2 * mp.factorial(n) / mp.pi ** (n + 1)
+            * (1 - mp.mpf(2) ** (-(n + 1))) * mp.zeta(n + 1))
+
+
+# --------------------------------------------------------------------------
+# [1] and [2] : the two tables
+# --------------------------------------------------------------------------
+
+DEFAULT_NS = [2, 4, 6, 8, 10, 20, 40, 60, 100]
+
+
+def tables(ns, latex_path=None):
+    rows1, rows2 = [], []
+    print("\n=== Table 1: location of the even-order extrema (Theorem 6.1) ===")
+    print(f"{'n':>4}  {'x_n':<24} {'x_n^(0)':<24} {'x_n-x_n^(0)':<12} {'ratio->1':>12}")
+    for n in ns:
+        xn, x00 = extremum(n), x0(n)
+        d = xn - x00
+        ratio = d / second_order_term(n)
+        print(f"{n:>4}  {mp.nstr(xn, 16):<24} {mp.nstr(x00, 16):<24} "
+              f"{mp.nstr(d, 4):<12} {mp.nstr(ratio, 8):>12}")
+        rows1.append((n, xn, x00, d, ratio))
+
+    print("\n=== Table 2: normalized uniform norms (Theorem 7.1) ===")
+    print(f"{'n':>4}  {'A_n':<20} {'cos^{n+2}':<20} {'(A_n-cos)*3^(n+1) -> 1/2':>26}")
+    for n, xn, _, _, _ in rows1:
+        A = normalized_norm(n, xn)
+        c = cos_term(n)
+        diag = (A - c) * mp.mpf(3) ** (n + 1)
+        print(f"{n:>4}  {mp.nstr(A, 14):<20} {mp.nstr(c, 14):<20} "
+              f"{mp.nstr(diag, 8):>26}")
+        rows2.append((n, A, c, diag))
+
+    print("\n=== n*x_n  ->  pi^2/2 = %s ===" % mp.nstr(mp.pi ** 2 / 2, 16))
+    for n, xn, _, _, _ in rows1:
+        print(f"  n={n:<5} n*x_n = {mp.nstr(n * xn, 14)}")
+
+    print("\n=== refinement of eq. (20): (ratio-1)*(n+2) -> pi^2/9 = %s ==="
+          % mp.nstr(mp.pi ** 2 / 9, 10))
+    for n, _, _, _, ratio in rows1:
+        if n >= 10:
+            print(f"  n={n:<5} {mp.nstr((ratio - 1) * (n + 2), 10)}")
+
+    if latex_path:
+        write_latex_tables(rows1, rows2, latex_path)
+    return rows1, rows2
+
+
+def _sci(v, digits=4):
+    """Format a small positive mpf as LaTeX  a\\cdot10^{b}."""
+    txt = mp.nstr(v, digits)
+    if "e" in txt:
+        mant, exp = txt.split("e")
+        return "$%s\\cdot10^{%d}$" % (mant, int(exp))
+    return "$%s$" % txt
+
+
+def write_latex_tables(rows1, rows2, path):
+    with open(path, "w") as f:
+        f.write("%% Table 1\n")
+        for n, xn, x00, d, ratio in rows1:
+            f.write("%d & %s & %s & %s & %s \\\\\n"
+                    % (n, mp.nstr(xn, 16), mp.nstr(x00, 16),
+                       _sci(d), mp.nstr(ratio, 8)))
+        f.write("\n%% Table 2\n")
+        for n, A, c, diag in rows2:
+            f.write("%d & %s & %s & %s \\\\\n"
+                    % (n, mp.nstr(A, 14), mp.nstr(c, 14), mp.nstr(diag, 8)))
+    print("\n[written] %s" % path)
+
+
+# --------------------------------------------------------------------------
+# [3] audit of every explicit constant in the proofs
+# --------------------------------------------------------------------------
+
+
+def constant_audit():
+    print("\n=== Constant audit (Lemmas 4.2-4.3, Theorem 6.1) ===")
+    ok = True
+
+    def check(label, claim, value, bound, direction="<="):
+        nonlocal ok
+        good = value <= bound if direction == "<=" else value >= bound
+        ok &= bool(good)
+        print("  [%s] %-5s %-44s %-14s (%s %s)"
+              % ("OK " if good else "FAIL", label, claim, mp.nstr(value, 10),
+                 direction, mp.nstr(bound, 10)))
+
+    # Lemma 4.2 : -log cos t <= 0.518 t^2 on [0, pi/7]
+    c = mp.pi / 7   # t |-> -log(cos t)/t^2 is increasing, so the max is at the endpoint
+    check("L4.2", "max of -log(cos t)/t^2 on (0,pi/7]",
+          -mp.log(mp.cos(c)) / c ** 2, mp.mpf("0.518"))
+    check("L4.2", "0.518 * 8*pi^2/49  (M>=8)",
+          mp.mpf("0.518") * 8 * mp.pi ** 2 / 49, mp.mpf("0.835"))
+    check("L4.2", "exp(0.835) < 12/5", mp.e ** mp.mpf("0.835"), mp.mpf(12) / 5)
+    rho8 = mp.nsum(lambda j: (2 * j + 1) ** (-mp.mpf(8)), [1, mp.inf])
+    check("L4.2", "rho_M * 3^M at M=8   (<= 17/14)", rho8 * 3 ** 8, mp.mpf(17) / 14)
+    check("L4.2", "(12/5)(17/14) < 3", mp.mpf(12) / 5 * mp.mpf(17) / 14, mp.mpf(3))
+
+    # Lemma 4.3 : bounds on [0, pi/M], M >= 12
+    check("L4.3", "sec(pi/12) <= 1.036", mp.sec(mp.pi / 12), mp.mpf("1.036"))
+    check("L4.3", "1.036^2/3 < 0.358", mp.mpf("1.036") ** 2 / 3, mp.mpf("0.358"))
+    check("L4.3", "tan(pi/12)/(pi/12) <= 1.024",
+          mp.tan(mp.pi / 12) / (mp.pi / 12), mp.mpf("1.024"))
+    check("L4.3", "1.036*(0.358+1.024)*pi <= 4.53",
+          mp.mpf("1.036") * (mp.mpf("0.358") + mp.mpf("1.024")) * mp.pi,
+          mp.mpf("4.53"))
+    check("L4.3", "10.9 + 0.86*M <= 2M at M=12",
+          mp.mpf("10.9") + mp.mpf("0.86") * 12, mp.mpf(2 * 12))
+
+    # Theorem 6.1, Step 1-2
+    check("T6.1", "cos(0.1*pi) > 0.95", mp.cos(mp.pi / 10), mp.mpf("0.95"), ">=")
+    u = mp.mpf(3) ** (1 - 12)
+    check("T6.1", "arcsin(3^(1-M))/3^(1-M) <= 1.01 at M=12",
+          mp.asin(u) / u, mp.mpf("1.01"))
+    check("T6.1", "3*3^-M/(0.99) <= 3.04*3^-M", mp.mpf(3) / mp.mpf("0.99"),
+          mp.mpf("3.04"))
+
+    # empirical: |S| and |S'| on the first lobe, several M
+    print("  --- empirical check of Lemmas 4.2-4.3 on a grid ---")
+    for M in (12, 20, 40):
+        rho = mp.nsum(lambda j: (2 * j + 1) ** (-mp.mpf(M)), [1, mp.inf])
+        mS = mSp = mp.mpf(0)
+        for k in range(21):
+            phi = mp.pi / M * mp.mpf(k) / 20
+            S, Sp = _S_and_Sprime(M, phi)
+            mS, mSp = max(mS, abs(S)), max(mSp, abs(Sp))
+        print("    M=%-3d  max|S|*3^M = %-14s (<=3)   max|S'|/(M rho_M) = %s (<=2)"
+              % (M, mp.nstr(mS * mp.mpf(3) ** M, 8), mp.nstr(mSp / (M * rho), 8)))
+
+    print("  ==> %s" % ("all constants valid" if ok else "SOME CONSTANT FAILED"))
+    return ok
+
+
+def _S_and_Sprime(M, phi, jmax=60):
+    """S(phi) of eq. (16) and its derivative, by central differences."""
+    def S(p):
+        tot = mp.mpf(0)
+        for j in range(1, jmax):
+            psi = mp.atan(mp.tan(p) / (2 * j + 1))
+            tot += ((2 * j + 1) ** (-mp.mpf(M))
+                    * (mp.cos(psi) / mp.cos(p)) ** M * mp.cos(M * psi))
+        return tot
+    h = mp.mpf(10) ** (-(mp.mp.dps // 3))
+    return S(phi), (S(phi + h) - S(phi - h)) / (2 * h)
+
+
+# --------------------------------------------------------------------------
+# [4] uniqueness for n = 2,4,6,8  (Proposition 5.5)
+# --------------------------------------------------------------------------
+
+
+def eulerian_coeffs(m):
+    """[A(m,0), ..., A(m,m-1)]: coefficients of A_m(z) = sum_k A(m,k) z^k,
+    the Eulerian polynomial of degree m-1 used in eq. (3)."""
+    row = [1]                       # m = 1
+    for n in range(2, m + 1):
+        new = [0] * n
+        for k in range(n):
+            a = row[k] if k < len(row) else 0
+            b = row[k - 1] if 0 < k <= len(row) else 0
+            new[k] = (k + 1) * a + (n - k) * b
+        row = new
+    return row
+
+
+def uniqueness_small_orders(ns=(2, 4, 6, 8)):
+    print("\n=== Uniqueness in the first lobe for small even n (Prop. 5.5) ===")
+    all_ok = True
+    for n in ns:
+        m, N = n + 1, n + 1
+        coeffs = eulerian_coeffs(m)
+        poly = [mp.mpf(c) for c in coeffs[::-1]]         # highest degree first
+        roots = mp.polyroots(poly, maxsteps=300, extraprec=500)
+        x_right = mp.pi * mp.tan(mp.pi / N)              # right end of the lobe
+        inside = []
+        for r in roots:
+            if abs(mp.im(r)) > mp.mpf(10) ** (-(mp.mp.dps // 2)):
+                continue
+            r = mp.re(r)
+            if r >= 0:
+                continue
+            x = -mp.log(-r)
+            if 0 < x < x_right:
+                inside.append(x)
+        ok = (len(inside) == 1)
+        all_ok &= ok
+        print("  n=%-2d  A_%d = %s" % (n, m, coeffs))
+        print("        lobe = (0, %s)   zeros of A_%d inside: %d  %s"
+              % (mp.nstr(x_right, 10), m, len(inside),
+                 "[OK]" if ok else "[FAIL]"))
+        for x in sorted(inside):
+            print("        -> x = %s   (extremum from findroot: %s)"
+                  % (mp.nstr(x, 16), mp.nstr(extremum(n), 16)))
+    print("  ==> %s" % ("exactly one critical point per lobe"
+                        if all_ok else "UNEXPECTED COUNT"))
+    return all_ok
+
+
+# --------------------------------------------------------------------------
+# [5] cross-checks: Reimer's exact roots, odd-order norm
+# --------------------------------------------------------------------------
+
+
+def cross_checks():
+    print("\n=== Cross-check vs Reimer's exact main roots (Remark 1.1) ===")
+    z3 = -2 - mp.sqrt(3)
+    s = mp.sqrt(15 + mp.sqrt(105))
+    z5 = (2 + s) / (2 - s)
+    for n, z in ((2, z3), (4, z5)):
+        print("  zeta_%d(0) = %-18s  log|zeta| = %s   x_%d = %s"
+              % (n + 1, mp.nstr(z, 12), mp.nstr(mp.log(-z), 16), n,
+                 mp.nstr(extremum(n), 16)))
+
+    print("\n=== Odd orders: ||sigma^(n)||_inf = |sigma^(n)(0)| (Theorem 3.1) ===")
+    eps = mp.mpf(10) ** (-(mp.mp.dps // 2))
+    for n in (1, 3, 5, 11, 21):
+        at0 = abs(sigma_d(n, eps))
+        closed = odd_norm_closed_form(n)
+        grid_sup = max(abs(sigma_d(n, mp.mpf(t) / 20)) for t in range(1, 400))
+        print("  n=%-3d |sigma^(n)(0)| = %-22s closed form = %-22s sup on grid <= value: %s"
+              % (n, mp.nstr(at0, 18), mp.nstr(closed, 18),
+                 grid_sup <= at0 * (1 + mp.mpf(10) ** (-20))))
+
+
+# --------------------------------------------------------------------------
+# [6] figure
+# --------------------------------------------------------------------------
+
+
+def make_figure(path_pdf="figure1.pdf", path_png="figure1.png",
+                n_lobe=10, ns_panel_b=(6, 10, 14, 20, 30, 40, 60, 80, 120, 200)):
+    try:
+        import numpy as np
+        import matplotlib
+        if not in_notebook():
+            matplotlib.use("Agg")   # in a notebook keep the inline backend
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("\n[figure skipped] matplotlib / numpy not available")
+        return
+
+    print("\n=== Building the figure ===")
+    N = n_lobe + 1
+
+    def F(x):
+        """pi^N * sigma^(n)(x) / (eps_n 2 n!)  = sum_j (2j+1)^-N cos^N psi_j sin(N psi_j)."""
+        tot = mp.mpf(0)
+        for j in range(40):
+            psi = mp.atan(x / ((2 * j + 1) * mp.pi))
+            tot += (2 * j + 1) ** (-mp.mpf(N)) * mp.cos(psi) ** N * mp.sin(N * psi)
+        return float(tot)
+
+    xs = np.linspace(0, 6, 1200)
+    ys = np.array([F(mp.mpf(float(x))) for x in xs])
+    env = np.array([float(mp.cos(mp.atan(mp.mpf(float(x)) / mp.pi)) ** (N + 1))
+                    for x in xs])
+    a = float(x0(n_lobe))
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 3.9))
+
+    ax[0].plot(xs, ys, color="#1f3b73", lw=1.6,
+               label=r"$\pi^{N}\sigma^{(n)}/(\varepsilon_n 2n!)$")
+    ax[0].plot(xs, env, "--", color="#999999", lw=1.0,
+               label=r"envelope $\pm\cos^{N+1}\phi$")
+    ax[0].plot(xs, -env, "--", color="#999999", lw=1.0)
+    ax[0].axhline(0, color="k", lw=0.6)
+    ax[0].plot([a], [F(mp.mpf(a))], "o", color="#c0392b", ms=5)
+    ax[0].annotate(r"$x_n^{(0)}=\pi\tan\frac{\pi}{2(n+2)}$",
+                   xy=(a, F(mp.mpf(a))), xytext=(0.9, 0.86),
+                   arrowprops=dict(arrowstyle="->", color="#c0392b", lw=1),
+                   color="#c0392b", fontsize=9)
+    ax[0].set_xlabel("$x$")
+    ax[0].set_title("(a) lobe structure, $n=%d$" % n_lobe, fontsize=10)
+    ax[0].set_ylim(-1.15, 1.15)
+    ax[0].legend(fontsize=8, frameon=False)
+
+    ratios = []
+    for k in ns_panel_b:
+        need = int(0.48 * k) + 60
+        with mp.workdps(max(mp.mp.dps, need)):
+            xk, x0k = extremum(k), x0(k)
+            ratios.append(float((xk - x0k) / second_order_term(k)))
+    ax[1].plot(ns_panel_b, ratios, "o-", color="#1f3b73", ms=4,
+               label=r"$(x_n-x_n^{(0)})\,/\,\frac{\sqrt{3}\pi}{2}\frac{3^{-(n+2)}}{n+2}$")
+    ax[1].plot(ns_panel_b,
+               [1 + float(mp.pi ** 2) / (9 * (k + 2)) for k in ns_panel_b],
+               "--", color="#c0392b", lw=1.2, label=r"$1+\pi^2/[9(n+2)]$")
+    ax[1].axhline(1, color="k", lw=0.6)
+    ax[1].set_xscale("log")
+    ax[1].set_xlabel("$n$ (even)")
+    ax[1].set_title("(b) sharpness of the second-order term", fontsize=10)
+    ax[1].legend(fontsize=8, frameon=False)
+
+    plt.tight_layout()
+    for p in (path_pdf, path_png):
+        plt.savefig(p, dpi=200)
+        print("  [written] %s" % p)
+    if in_notebook():
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# --------------------------------------------------------------------------
+# main
+# --------------------------------------------------------------------------
+
+
+def in_notebook():
+    """True inside Jupyter/IPython, where sys.argv holds the kernel's own flags."""
+    return "ipykernel" in sys.modules or "IPython" in sys.modules
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--dps", type=int, default=200,
+                   help="working precision in decimal digits (default 200)")
+    p.add_argument("--nmax", type=int, default=100,
+                   help="largest even order in the tables (default 100)")
+    p.add_argument("--only", choices=["tables", "audit", "uniqueness",
+                                      "checks", "figure"],
+                   help="run a single section")
+    p.add_argument("--no-figure", action="store_true", help="skip the figure")
+    p.add_argument("--latex", default="tables.tex",
+                   help="path for the LaTeX table rows (default tables.tex)")
+    if argv is None:
+        # In a notebook sys.argv contains the kernel's -f flag, which argparse
+        # would reject; ignore it and use the defaults instead.
+        argv = [] if in_notebook() else sys.argv[1:]
+    args, unknown = p.parse_known_args(argv)
+    if unknown:
+        print("ignoring unrecognized arguments: %s" % " ".join(unknown),
+              file=sys.stderr)
+
+    mp.mp.dps = args.dps
+    need = int(0.48 * args.nmax) + 40
+    if args.dps < need:
+        print("WARNING: dps=%d is low for n=%d; use --dps %d or more."
+              % (args.dps, args.nmax, need), file=sys.stderr)
+
+    ns = [n for n in DEFAULT_NS if n <= args.nmax]
+    print("mpmath precision: %d digits;  orders: %s" % (mp.mp.dps, ns))
+
+    run = args.only
+    if run in (None, "tables"):
+        tables(ns, latex_path=args.latex)
+    if run in (None, "audit"):
+        constant_audit()
+    if run in (None, "uniqueness"):
+        uniqueness_small_orders()
+    if run in (None, "checks"):
+        cross_checks()
+    if (run in (None, "figure")) and not args.no_figure:
+        make_figure()
+
+    print("\ndone.")
+
+
+if __name__ == "__main__":
+    main()
